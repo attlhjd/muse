@@ -10,6 +10,7 @@ import {ONE_HOUR_IN_SECONDS, ONE_MINUTE_IN_SECONDS} from '../utils/constants.js'
 import {parseTime} from '../utils/time.js';
 import getYouTubeID from 'get-youtube-id';
 import {buildAudioFallbackQuery, rankAudioFallbackCandidates} from '../utils/youtube-audio-fallback.js';
+import {getYouTubeMetadata, type YouTubeMetadata} from '../utils/yt-dlp.js';
 
 interface VideoDetailsResponse {
   id: string;
@@ -65,6 +66,34 @@ interface SearchItem {
   };
 }
 
+// Maps yt-dlp output onto the Data API shape. Flat search and playlist entries
+// have no duration when the video is private, deleted or upcoming.
+const toVideoDetails = (entry: YouTubeMetadata | null | undefined): VideoDetailsResponse | null => {
+  if (!entry?.id || !entry.title || (!entry.duration && entry.live_status !== 'is_live')) {
+    return null;
+  }
+
+  return {
+    id: entry.id,
+    contentDetails: {
+      videoId: entry.id,
+      duration: `PT${Math.round(entry.duration ?? 0)}S`,
+      contentRating: (entry.age_limit ?? 0) >= 18 ? {ytRating: 'ytAgeRestricted'} : undefined,
+    },
+    snippet: {
+      title: entry.title,
+      channelTitle: entry.channel ?? entry.uploader ?? '',
+      liveBroadcastContent: entry.live_status === 'is_live' ? 'live' : 'none',
+      description: entry.description ?? '',
+      thumbnails: {
+        medium: {url: `https://i.ytimg.com/vi/${entry.id}/mqdefault.jpg`},
+      },
+    },
+  };
+};
+
+const isVideoDetails = (video: VideoDetailsResponse | null | undefined): video is VideoDetailsResponse => Boolean(video);
+
 @injectable()
 export default class {
   private readonly youtubeKey: string;
@@ -86,20 +115,18 @@ export default class {
   }
 
   async search(query: string, shouldSplitChapters: boolean): Promise<SongMetadata[]> {
-    const ids = await this.searchVideoIDs(query);
+    const [firstVideo] = await this.searchVideos(query);
 
-    if (ids.length === 0) {
+    if (!firstVideo) {
       return [];
     }
 
-    const videos = await this.getVideosByID(ids);
-    const firstVideo = ids
-      .map(id => videos.find(video => video.id === id))
-      .find(Boolean);
+    // Search results from yt-dlp only carry a description snippet, too short for chapters.
+    if (shouldSplitChapters && !this.youtubeKey) {
+      return this.getVideo(firstVideo.id, true);
+    }
 
-    return firstVideo
-      ? this.getMetadataFromVideo({video: firstVideo, shouldSplitChapters})
-      : [];
+    return this.getMetadataFromVideo({video: firstVideo, shouldSplitChapters});
   }
 
   async findAudioFallback(song: SongMetadata): Promise<SongMetadata | null> {
@@ -112,18 +139,10 @@ export default class {
       return null;
     }
 
-    const ids = (await this.searchVideoIDs(query, {videoCategoryId: '10'}))
-      .filter(id => id !== song.url);
-    if (ids.length === 0) {
-      return null;
-    }
-
-    const videos = await this.getVideosByID(ids);
-    const candidates = ids
-      .map(id => videos.find(video => video.id === id))
-      .filter((video): video is VideoDetailsResponse => (
-        Boolean(video)
-        && video!.contentDetails.contentRating?.ytRating !== 'ytAgeRestricted'
+    const candidates = (await this.searchVideos(query, {videoCategoryId: '10'}))
+      .filter(video => (
+        video.id !== song.url
+        && video.contentDetails.contentRating?.ytRating !== 'ytAgeRestricted'
       ))
       .flatMap(video => this.getMetadataFromVideo({video, shouldSplitChapters: false}));
 
@@ -137,8 +156,9 @@ export default class {
       throw new Error('Video could not be found.');
     }
 
-    const result = await this.getVideosByID([videoId]);
-    const video = result.at(0);
+    const video = this.youtubeKey
+      ? (await this.getVideosByID([videoId])).at(0)
+      : toVideoDetails(await this.getYtDlpMetadata(`https://www.youtube.com/watch?v=${videoId}`, 1, ONE_HOUR_IN_SECONDS));
 
     if (!video) {
       throw new Error('Video could not be found.');
@@ -150,6 +170,10 @@ export default class {
   async getPlaylist(listId: string, shouldSplitChapters: boolean, playlistLimit = Number.POSITIVE_INFINITY): Promise<SongMetadata[]> {
     if (playlistLimit < 1) {
       return [];
+    }
+
+    if (!this.youtubeKey) {
+      return this.getPlaylistWithYtDlp(listId, shouldSplitChapters, playlistLimit);
     }
 
     const playlistParams = {
@@ -322,6 +346,50 @@ export default class {
     }
 
     return chapters;
+  }
+
+  private async searchVideos(query: string, options: {videoCategoryId?: string} = {}): Promise<VideoDetailsResponse[]> {
+    if (!this.youtubeKey) {
+      const results = await this.getYtDlpMetadata(`ytsearch10:${query}`, 10, ONE_HOUR_IN_SECONDS);
+      return (results.entries ?? []).map(toVideoDetails).filter(isVideoDetails);
+    }
+
+    const ids = await this.searchVideoIDs(query, options);
+    if (ids.length === 0) {
+      return [];
+    }
+
+    const videos = await this.getVideosByID(ids);
+    return ids
+      .map(id => videos.find(video => video.id === id))
+      .filter(isVideoDetails);
+  }
+
+  private async getPlaylistWithYtDlp(listId: string, shouldSplitChapters: boolean, playlistLimit: number): Promise<SongMetadata[]> {
+    const playlist = await this.getYtDlpMetadata(
+      `https://www.youtube.com/playlist?list=${encodeURIComponent(listId)}`,
+      Number.isFinite(playlistLimit) ? playlistLimit : Number.MAX_SAFE_INTEGER,
+      ONE_MINUTE_IN_SECONDS,
+    );
+
+    if (!playlist.entries) {
+      throw new Error('Playlist could not be found.');
+    }
+
+    const queuedPlaylist = {title: playlist.title ?? listId, source: playlist.id ?? listId};
+    return playlist.entries
+      .map(toVideoDetails)
+      .filter(isVideoDetails)
+      .flatMap(video => this.getMetadataFromVideo({video, queuedPlaylist, shouldSplitChapters}))
+      .slice(0, playlistLimit);
+  }
+
+  private async getYtDlpMetadata(url: string, playlistLimit: number, expiresIn: number): Promise<YouTubeMetadata> {
+    return this.cache.wrap(
+      async () => this.videoDetailsLimit(async () => getYouTubeMetadata(url, playlistLimit)),
+      {ytDlp: url, playlistLimit},
+      {expiresIn},
+    );
   }
 
   private async searchVideoIDs(query: string, options: {videoCategoryId?: string} = {}): Promise<string[]> {

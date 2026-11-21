@@ -34,6 +34,18 @@ export interface SoundCloudMetadata {
   readonly entries?: ReadonlyArray<SoundCloudMetadata | null>;
 }
 
+export interface YouTubeMetadata {
+  readonly id?: string;
+  readonly title?: string;
+  readonly channel?: string;
+  readonly uploader?: string;
+  readonly duration?: number | null;
+  readonly description?: string | null;
+  readonly live_status?: string | null;
+  readonly age_limit?: number;
+  readonly entries?: ReadonlyArray<YouTubeMetadata | null>;
+}
+
 export interface YtDlpMediaSource {
   readonly url: string;
   readonly headers: Record<string, string>;
@@ -396,6 +408,11 @@ const toMediaSource = (response: YtDlpResponse): YtDlpMediaSource => {
 
 export const getYouTubeMediaSource = async (videoIdOrUrl: string): Promise<YtDlpMediaSource> => (
   toMediaSource(await extractMedia(toYouTubeWatchUrl(videoIdOrUrl)))
+);
+
+// Playlists and ytsearch results stay flat; a single video still returns its full metadata.
+export const getYouTubeMetadata = async (url: string, playlistLimit: number): Promise<YouTubeMetadata> => (
+  extractMedia(url, Math.max(1, Math.floor(playlistLimit))) as Promise<YouTubeMetadata>
 );
 
 export const getSoundCloudMetadata = async (url: string, playlistLimit: number): Promise<SoundCloudMetadata> => (

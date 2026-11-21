@@ -7,13 +7,17 @@ Fork de [museofficial/muse](https://github.com/museofficial/muse). La branche d�
 - Commande `/miaou` ([src/commands/miaou.ts](src/commands/miaou.ts)) : joue un miaou au hasard dans le salon vocal et poste une image de chat de cataas.com (sans image si cataas ne répond pas en 5 s).
 - `Player.playSoundEffect` ([src/services/player.ts](src/services/player.ts)) : si le bot est déjà connecté, il emprunte la connexion. La musique se met alors en pause d'elle-même, sans abonné, et reprend avec un compteur de position juste. Sinon, il rejoint le salon de l'utilisateur, miaule et repart.
 - Sons : [assets/miaous/](assets/miaous/), 13 extraits CC0 ou du domaine public (sources dans `CREDITS.md`), à −16 LUFS en Ogg Opus 48 kHz stéréo. Pour en ajouter un, il suffit de déposer un `.ogg` Opus dans ce dossier, il sera pris en compte au prochain déploiement.
-- Tests : [tests/sound-effect.test.ts](tests/sound-effect.test.ts).
+- `YOUTUBE_API_KEY` facultative ([src/services/youtube-api.ts](src/services/youtube-api.ts)). Sans clé, la recherche (`ytsearch10:`), les infos d'une vidéo, les playlists et la recherche d'une version de remplacement passent par yt-dlp avec les cookies, et le résultat est converti au format de l'API Data. Avec une clé, le comportement d'origine est inchangé. Limites du mode sans clé :
+  - pas de découpage en chapitres pour les morceaux d'une playlist (les entrées « à plat » n'ont pas de description) ;
+  - la limite de taille d'une playlist compte aussi les vidéos privées ;
+  - la recherche de remplacement ne se restreint pas à la catégorie Musique.
+- Tests : [tests/sound-effect.test.ts](tests/sound-effect.test.ts), [tests/youtube-yt-dlp.test.ts](tests/youtube-yt-dlp.test.ts).
 
 ## Déploiement (Coolify, serveur localhost)
 
 - Application `muse-lupin` (uuid `qrsvg4diw9feuftvmohfk9q0`), projet « Musique Discord ». Elle est construite avec le `Dockerfile` du dépôt, branche `lupin`, sans domaine ni port public.
 - Pour mettre à jour : `git push origin lupin`, puis `POST /api/v1/deploy {"uuid":"qrsvg4diw9feuftvmohfk9q0"}`.
-- Variables, toutes en exécution seulement, jamais au build : `DISCORD_TOKEN`, `YOUTUBE_API_KEY`, `YT_DLP_AUTO_UPDATE=true`, `YT_DLP_COOKIES_PATH=/run/secrets/youtube-cookies.txt`, `CACHE_LIMIT=2GB`.
+- Variables, toutes en exécution seulement, jamais au build : `DISCORD_TOKEN`, `YT_DLP_AUTO_UPDATE=true`, `YT_DLP_COOKIES_PATH=/run/secrets/youtube-cookies.txt`, `CACHE_LIMIT=2GB`. Pas de `YOUTUBE_API_KEY` depuis le 2026-11-21 : la clé était refusée par Google (403 ACCESS_DENIED), et le bot passe par yt-dlp. Ne pas la remettre sans l'avoir testée, car une clé présente mais refusée fait échouer tous les `/play`.
 - Stockages :
   - le volume `eugkyedm65dcjgeqczsitrok_muse-data` sur `/data`, repris de l'ancien service. Coolify préfixe les noms à la création : il faut corriger le nom par `PATCH /applications/{uuid}/storages` ;
   - le fichier `/run/secrets/youtube-cookies.txt`, modifiable dans Coolify, onglet Persistent Storage. Il contient les cookies d'un compte YouTube dédié au bot : YouTube bloque l'IP du VPS sans eux.

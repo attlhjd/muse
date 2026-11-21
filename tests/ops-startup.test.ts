@@ -110,7 +110,16 @@ describe('OPS-01 environment and config loading', () => {
     expect(config.BOT_ACTIVITY).toBe('preservation music');
   });
 
-  it.each(['DISCORD_TOKEN', 'YOUTUBE_API_KEY'] as const)(
+  it.each(['   ', undefined])('leaves YOUTUBE_API_KEY empty when it is %j so YouTube goes through yt-dlp', async youtubeApiKey => {
+    const {default: Config} = await loadConfig({
+      DISCORD_TOKEN: 'discord-secret',
+      ...(youtubeApiKey === undefined ? {} : {YOUTUBE_API_KEY: youtubeApiKey}),
+    });
+
+    expect(new Config().YOUTUBE_API_KEY).toBe('');
+  });
+
+  it.each(['DISCORD_TOKEN'] as const)(
     'rejects a whitespace-only %s without logging its value',
     async requiredKey => {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -132,7 +141,7 @@ describe('OPS-01 environment and config loading', () => {
     },
   );
 
-  it.each(['DISCORD_TOKEN', 'YOUTUBE_API_KEY'] as const)(
+  it.each(['DISCORD_TOKEN'] as const)(
     'rejects a missing %s without logging configured secret values',
     async requiredKey => {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
