@@ -1,4 +1,5 @@
 import {VoiceChannel} from 'discord.js';
+import {createReadStream} from 'fs';
 import {Readable} from 'stream';
 import {setTimeout as sleep} from 'timers/promises';
 import hasha from 'hasha';
@@ -52,6 +53,7 @@ const PREFETCH_LEAD_SECONDS = 60;
 const PREFETCH_MAX_AGE_MS = 10 * 60 * 1000;
 const VOICE_CONNECTION_ATTEMPTS = 3;
 const VOICE_CONNECTION_ATTEMPT_TIMEOUT_MS = 20_000;
+const SOUND_EFFECT_TIMEOUT_MS = 15_000;
 
 const sanitizeFfmpegError = (error: unknown) => {
   const detail = error instanceof Error ? error.message : String(error);
@@ -147,6 +149,7 @@ export default class {
   private readonly fileCache: FileCacheProvider;
   private readonly ageRestrictedFallbackResolver?: AgeRestrictedFallbackResolver;
   private disconnectTimer: NodeJS.Timeout | null = null;
+  private isPlayingSoundEffect = false;
   private prefetchedMedia?: {song: QueuedSong; fetchedAt: number; mediaSource: Promise<YtDlpMediaSource | null>};
 
   private readonly channelToSpeakingUsers: Map<string, Set<string>> = new Map();
@@ -263,6 +266,48 @@ export default class {
     if (this.playingMessage?.keepAfterFinish) {
       this.playingMessage.terminalState = reason;
       this.requestPlayingMessageUpdate();
+    }
+  }
+
+  /**
+   * Plays a short Ogg Opus clip in the current voice channel, or in `channel`
+   * when not connected. A connection carries one stream at a time, so the
+   * music player auto-pauses until it is subscribed again.
+   */
+  async playSoundEffect(channel: VoiceChannel, filePath: string): Promise<void> {
+    if (this.isPlayingSoundEffect) {
+      throw new Error('je miaule déjà, patience');
+    }
+
+    this.isPlayingSoundEffect = true;
+    const joinedForEffect = this.voiceConnection === null && !this.pendingConnection;
+    try {
+      if (joinedForEffect) {
+        await this.connect(channel);
+      }
+
+      const voiceConnection = await this.ensureVoiceConnectionReady();
+      const musicWasPlaying = this.status === STATUS.PLAYING;
+      if (musicWasPlaying) {
+        this.stopTrackingPosition();
+      }
+
+      const effectPlayer = createAudioPlayer();
+      effectPlayer.on('error', error => {
+        console.error(`Sound effect failed for guild ${this.guildId}: ${error.message}`);
+      });
+
+      try {
+        voiceConnection.subscribe(effectPlayer);
+        effectPlayer.play(createAudioResource(createReadStream(filePath), {inputType: StreamType.OggOpus}));
+        // Times out when music takes the connection back mid-clip; nothing to report then.
+        await entersState(effectPlayer, AudioPlayerStatus.Idle, SOUND_EFFECT_TIMEOUT_MS).catch(() => undefined);
+      } finally {
+        effectPlayer.stop(true);
+        this.handBackAfterSoundEffect(voiceConnection, joinedForEffect, musicWasPlaying);
+      }
+    } finally {
+      this.isPlayingSoundEffect = false;
     }
   }
 
@@ -1240,6 +1285,21 @@ export default class {
     const mediaSource = await prefetched.mediaSource;
 
     return Date.now() - prefetched.fetchedAt <= PREFETCH_MAX_AGE_MS ? mediaSource : null;
+  }
+
+  private handBackAfterSoundEffect(voiceConnection: VoiceConnection, joinedForEffect: boolean, musicWasPlaying: boolean): void {
+    if (this.voiceConnection !== voiceConnection) {
+      return;
+    }
+
+    if (this.audioPlayer) {
+      voiceConnection.subscribe(this.audioPlayer);
+      if (musicWasPlaying && this.status === STATUS.PLAYING) {
+        this.startTrackingPosition();
+      }
+    } else if (joinedForEffect && !this.getCurrent()) {
+      this.disconnect();
+    }
   }
 
   private stopTrackingPosition(): void {
